@@ -1,6 +1,7 @@
 const logger = require('../utils/logger')
 const databaseService = require('./databaseService')
 const projectMemberService = require('./projectMemberService')
+const { databaseManager } = require('../config/database')
 
 
 class ProjectBonusService {
@@ -322,32 +323,78 @@ class ProjectBonusService {
 
       // 先删除该奖金池的所有旧分配记录，防止重复
       console.log(`🧹 清理该奖金池的旧分配记录...`)
-      try {
-        const deleteResult = await databaseService.deleteMany('projectBonusAllocations', { poolId: pool._id })
-        console.log(`✅ 已删除 ${deleteResult} 条旧记录`)
-      } catch (deleteError) {
-        console.warn(`⚠️ 删除旧记录失败:`, deleteError.message)
-      }
-
-      // 保存分配记录到数据库
-      console.log(`💾 保存奖金分配记录到数据库...`)
-      const savedAllocations = []
       
-      for (const allocation of allocations) {
-        try {
-          const allocationRecord = await databaseService.createProjectBonusAllocation({
-            ...allocation,
-            bonusAmount: allocation.bonusAmount,
-            createdAt: new Date(),
-            updatedAt: new Date()
-          })
-          
-          savedAllocations.push(allocationRecord)
-          console.log(`✅ 成员 ${allocation.employeeId} 奖金记录保存成功`)
-        } catch (saveError) {
-          console.error(`❌ 保存成员 ${allocation.employeeId} 奖金记录失败:`, saveError.message)
-          throw new Error(`保存奖金分配记录失败: ${saveError.message}`)
+      // ✅ 使用事务保证数据一致性：删除旧数据 + 插入新数据
+      const connection = await databaseManager.beginTransaction()
+      let savedAllocations = [] // ✅ 在try外定义，扩大作用域
+      
+      try {
+        console.log(`🔒 事务开启，开始原子操作...`)
+        
+        // 步骤1: 删除旧记录
+        const deleteResult = await connection.query(
+          'DELETE FROM project_bonus_allocations WHERE pool_id = ?',
+          [pool._id]
+        )
+        console.log(`✅ 已删除 ${deleteResult.affectedRows || 0} 条旧记录`)
+        
+        // 步骤2: 保存新记录
+        console.log(`💾 保存奖金分配记录到数据库...`)
+        
+        for (const allocation of allocations) {
+          try {
+            // ✅ 生挅16位随机ID（project_bonus_allocations表使用varchar主键）
+            const generateId = () => {
+              const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+              let result = ''
+              for (let i = 0; i < 16; i++) {
+                result += chars.charAt(Math.floor(Math.random() * chars.length))
+              }
+              return result
+            }
+            const allocationId = generateId()
+            
+            // 直接使用 connection 执行 INSERT
+            await connection.query(
+              `INSERT INTO project_bonus_allocations 
+              (id, pool_id, employee_id, role_id, role_weight, performance_coeff, participation_ratio, contribution_weight, bonus_amount, status, created_at, updated_at) 
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+              [
+                allocationId,
+                allocation.poolId,
+                allocation.employeeId,
+                allocation.roleId,
+                allocation.roleWeight,
+                allocation.performanceCoeff,
+                allocation.participationRatio,
+                allocation.contributionWeight,
+                allocation.bonusAmount,
+                allocation.status
+              ]
+            )
+            
+            savedAllocations.push({
+              ...allocation,
+              _id: allocationId,
+              id: allocationId
+            })
+            console.log(`✅ 成员 ${allocation.employeeId} 奖金记录保存成功 (ID: ${allocationId})`)
+          } catch (saveError) {
+            // 单条记录失败，抛出异常触发回滚
+            console.error(`❌ 保存成员 ${allocation.employeeId} 奖金记录失败:`, saveError.message)
+            throw new Error(`保存奖金分配记录失败: ${saveError.message}`)
+          }
         }
+        
+        // 步骤3: 提交事务
+        await databaseManager.commitTransaction(connection)
+        console.log(`✅ 事务提交成功，所有操作已持久化`)
+        
+      } catch (transactionError) {
+        // 事务失败，回滚
+        await databaseManager.rollbackTransaction(connection)
+        console.error(`❌ 事务回滚: ${transactionError.message}`)
+        throw new Error(`奖金分配事务失败: ${transactionError.message}`)
       }
       
       const totalAllocatedAmt = savedAllocations.reduce((sum, alloc) => sum + (parseFloat(alloc.bonusAmount) || 0), 0)

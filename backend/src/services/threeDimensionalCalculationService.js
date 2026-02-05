@@ -601,9 +601,34 @@ class ThreeDimensionalCalculationService {
 
     const employeeMap = new Map()
     employees.forEach(emp => employeeMap.set(emp._id || emp.id, emp))
+    
+    // ✅ 批量预加载：一次性查询所有员工的绩效数据，避免 N+1 查询
+    console.log(`🚀 步骤0/3: 批量预加载绩效数据...`)
+    const performanceRecords = await databaseManager.query(`
+      SELECT 
+        employee_id,
+        profit_contribution,
+        position_score,
+        performance_score,
+        calculation_period
+      FROM performance_three_dimensional_scores 
+      WHERE employee_id IN (?) AND calculation_period = ?
+    `, [employeeIds, period])
+    
+    // 构建员工ID -> 绩效记录的映射
+    const performanceMap = new Map()
+    performanceRecords.forEach(record => {
+      performanceMap.set(record.employee_id, {
+        profitContribution: parseFloat(record.profit_contribution || 0),
+        positionScore: parseFloat(record.position_score || 0),
+        performanceScore: parseFloat(record.performance_score || 0)
+      })
+    })
+    
+    console.log(`✅ 预加载完成: ${performanceRecords.length} 条绩效记录`)
 
     // **第一步：收集所有员工的原始得分**
-    console.log('🔍 步骤1/2: 收集原始得分...')
+    console.log('🔍 步骤1/3: 收集原始得分...')
     const allRawScores = []
     
     for (const employeeId of employeeIds) {
@@ -614,10 +639,21 @@ class ThreeDimensionalCalculationService {
           continue
         }
 
-        // 获取三个维度的原始得分
-        const profitScore = await this.getProfitContributionScore(employeeId, period, options)
-        const positionScore = await this.getPositionValueScore(employeeId, period, options)
-        const performanceScore = await this.getPerformanceScore(employeeId, period, options)
+        // ✅ 从内存中获取预加载的绩效数据，而不是重复查询数据库
+        const perfData = performanceMap.get(employeeId)
+        
+        // 获取三个维度的原始得分（优先使用预加载数据）
+        const profitScore = perfData 
+          ? { score: perfData.profitContribution, details: { source: 'preloaded' }, dataVersion: new Date().toISOString() }
+          : await this.getProfitContributionScore(employeeId, period, options)
+        
+        const positionScore = perfData
+          ? { score: perfData.positionScore, details: { source: 'preloaded' }, dataVersion: new Date().toISOString() }
+          : await this.getPositionValueScore(employeeId, period, options)
+        
+        const performanceScore = perfData
+          ? { score: perfData.performanceScore, details: { source: 'preloaded' }, dataVersion: new Date().toISOString() }
+          : await this.getPerformanceScore(employeeId, period, options)
         
         allRawScores.push({
           employeeId,
@@ -634,7 +670,7 @@ class ThreeDimensionalCalculationService {
     console.log(`✅ 收集完成: ${allRawScores.length} 名员工的原始得分`)
     
     // **第二步：使用当前批次数据统一归一化**
-    console.log('🔍 步骤2/2: 统一归一化并计算最终得分...')
+    console.log('🔍 步骤2/3: 统一归一化并计算最终得分...')
     
     for (const rawScore of allRawScores) {
       try {
@@ -684,6 +720,7 @@ class ThreeDimensionalCalculationService {
     console.log(`✅ 批量计算完成: 成功 ${results.length} 个，失败 ${errors.length} 个`)
     
     // 检查是否有得分超过100分，如果有则进行归一化
+    console.log(`🔍 步骤3/3: 检查得分范围并归一化...`)
     const maxScore = Math.max(...results.map(r => r.adjustedScore || 0))
     if (maxScore > 100) {
       console.log(`📊 检测到最高分 ${maxScore.toFixed(2)} 超过100分，开始归一化到百分制...`)
