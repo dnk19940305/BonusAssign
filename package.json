@@ -1,0 +1,28 @@
+{
+  "name": "bonus-simulation-system",
+  "version": "1.0.0",
+  "description": "奖金模拟系统 - Vue3 + Express 全栈应用",
+  "private": true,
+  "scripts": {
+    "start": "node simple-server.js",
+    "dev": "node simple-server.js",
+    "build": "cd frontend && npm install && npm run build && cd .. && cp -r frontend/dist dist",
+    "install-deps": "cd backend && npm install && cd ../frontend && npm install && cd ..",
+    "backend:dev": "cd backend && npm run dev",
+    "backend:start": "cd backend && npm start",
+    "frontend:dev": "cd frontend && npm run dev",
+    "frontend:build": "cd frontend && npm run build",
+    "test": "cd backend && npm test",
+    "test:frontend": "cd frontend && npm run test:unit",
+    "test:e2e": "cd frontend && npm run test:e2e"
+  },
+  "keywords": [
+    "bonus-simulation",
+    "vue3",
+    "express",
+    "nodejs",
+    "mysql"
+  ],
+  "author": "Dev Team",
+  "license": "MIT"
+}

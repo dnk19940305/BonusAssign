@@ -1,0 +1,206 @@
+version: '3.8'
+
+# ========================================
+# 奖金系统 - 生产环境 Docker Compose 配置
+# ========================================
+# 
+# 服务说明:
+# 1. mysql - MySQL 8.0 数据库服务,自动初始化 bonus_system.sql
+# 2. backend - Node.js 后端 API 服务
+# 3. frontend - Nginx 前端静态文件服务
+# 
+# 使用方式:
+# - 启动: docker-compose -f docker-compose.production.yml up -d
+# - 停止: docker-compose -f docker-compose.production.yml down
+# - 查看日志: docker-compose -f docker-compose.production.yml logs -f
+# ========================================
+
+services:
+  # ========================================
+  # MySQL 8.0 数据库服务
+  # ========================================
+  mysql:
+    image: mysql:8.0
+    container_name: bonus-system-mysql
+    restart: unless-stopped
+    
+    environment:
+      # MySQL 配置
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-bonus_system}
+      MYSQL_USER: ${MYSQL_USER:-bonus_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-rootpassword}
+      TZ: Asia/Shanghai
+    
+    ports:
+      # 映射 MySQL 端口到宿主机
+      - "${DB_PORT:-3306}:3306"
+    
+    volumes:
+      # MySQL 数据持久化 - 将数据库文件保存到宿主机
+      - ./mysql_data:/var/lib/mysql
+      
+      # 初始化脚本 - 首次启动时自动执行 SQL 文件创建表和初始数据
+      - ./database/bonus_system.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      
+      # MySQL 配置文件
+      - ./mysql_config/my.cnf:/etc/mysql/conf.d/my.cnf:ro
+    
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --max_connections=500
+      --sql_mode=STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+    
+    networks:
+      - bonus-network
+    
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpassword}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  # ========================================
+  # 后端 API 服务 (Node.js + Express)
+  # ========================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.production
+      args:
+        NODE_ENV: production
+    
+    container_name: bonus-system-backend
+    restart: unless-stopped
+    
+    environment:
+      # 应用环境
+      NODE_ENV: production
+      PORT: 3000
+      
+      # 数据库连接配置 - 使用容器名称作为主机地址
+      DB_TYPE: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: ${DB_NAME:-bonus_system}
+      DB_USER: ${DB_USER:-root}
+      DB_PASSWORD: ${DB_PASSWORD:-rootpassword}
+      
+      # JWT 认证配置
+      JWT_SECRET: ${JWT_SECRET:-your-super-secret-jwt-key-change-in-production-2024}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-your-super-secret-refresh-key-change-in-production-2024}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-2h}
+      JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN:-7d}
+      
+      # 日志配置
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      
+      # 安全配置
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost}
+      RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-15}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-100}
+    
+    ports:
+      # 映射后端 API 端口到宿主机
+      - "${BACKEND_PORT:-3000}:3000"
+    
+    volumes:
+      # 映射整个 backend 文件夹作为应用代码
+      - ./backend:/app
+      
+      # 排除 node_modules,使用容器内安装的依赖
+      - /app/node_modules
+      
+      # 日志文件持久化
+      - backend_logs:/app/logs
+    
+    depends_on:
+      mysql:
+        condition: service_healthy
+    
+    networks:
+      - bonus-network
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ========================================
+  # 前端服务 (Nginx + Vue3)
+  # ========================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.production
+      args:
+        BACKEND_URL: ${BACKEND_URL:-http://localhost:3000}
+    
+    container_name: bonus-system-frontend
+    restart: unless-stopped
+    
+    ports:
+      # HTTP 端口
+      - "${FRONTEND_PORT:-80}:80"
+      # HTTPS 端口 (如需启用 SSL,请取消注释并配置证书)
+      # - "443:443"
+    
+    volumes:
+      # Nginx 配置文件映射
+      - ./frontend/nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      
+      # 前端日志持久化
+      - frontend_logs:/var/log/nginx
+      
+      # 如果需要映射 SSL 证书,取消以下注释
+      # - ./ssl/cert.pem:/etc/nginx/ssl/cert.pem:ro
+      # - ./ssl/key.pem:/etc/nginx/ssl/key.pem:ro
+    
+    depends_on:
+      - backend
+    
+    networks:
+      - bonus-network
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# ========================================
+# 持久化数据卷
+# ========================================
+volumes:
+  # 后端日志卷
+  backend_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./logs/backend
+  
+  # 前端日志卷
+  frontend_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./logs/frontend
+
+# ========================================
+# Docker 网络配置
+# ========================================
+networks:
+  bonus-network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1

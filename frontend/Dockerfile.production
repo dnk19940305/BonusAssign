@@ -1,0 +1,65 @@
+# ========================================
+# 前端服务 - 生产环境 Dockerfile
+# ========================================
+# 
+# 构建说明:
+# 1. 阶段一: 使用 Node.js 构建前端项目
+# 2. 阶段二: 使用 Nginx 提供静态文件服务
+# 3. 配置 API 代理转发到后端服务
+# 
+# 使用方式:
+# docker build -f Dockerfile.production -t bonus-frontend:prod .
+# ========================================
+
+# ========================================
+# 阶段 1: 构建阶段
+# ========================================
+FROM node:18-alpine AS builder
+
+# 设置构建参数
+ARG BACKEND_URL=http://localhost:3000
+
+# 设置工作目录
+WORKDIR /app
+
+# 复制 package.json 和 package-lock.json
+COPY package*.json ./
+
+# 安装依赖
+RUN npm ci && npm cache clean --force
+
+# 复制源代码
+COPY . .
+
+# 构建生产版本
+ENV VITE_API_BASE_URL=${BACKEND_URL}
+RUN npm run build
+
+# ========================================
+# 阶段 2: 生产运行阶段
+# ========================================
+FROM nginx:1.25-alpine
+
+# 安装 curl 用于健康检查
+RUN apk add --no-cache curl
+
+# 从构建阶段复制构建产物
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# 复制 Nginx 配置文件
+COPY nginx.prod.conf /etc/nginx/nginx.conf
+
+# 创建日志目录
+RUN mkdir -p /var/log/nginx && \
+    chown -R nginx:nginx /var/log/nginx && \
+    chown -R nginx:nginx /usr/share/nginx/html
+
+# 暴露端口
+EXPOSE 80 443
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost/ || exit 1
+
+# 启动 Nginx
+CMD ["nginx", "-g", "daemon off;"]

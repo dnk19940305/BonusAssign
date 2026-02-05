@@ -1,0 +1,26 @@
+-- 创建报表表
+CREATE TABLE IF NOT EXISTS `reports` (
+  `id` VARCHAR(50) NOT NULL COMMENT '报表ID',
+  `name` VARCHAR(200) NOT NULL COMMENT '报表名称',
+  `category` VARCHAR(50) NOT NULL COMMENT '报表分类：bonus-奖金报表，statistics-统计报表，custom-自定义报表',
+  `description` TEXT COMMENT '报表描述',
+  `date_range` JSON COMMENT '日期范围',
+  `fields` JSON COMMENT '包含字段',
+  `filters` JSON COMMENT '过滤条件',
+  `format` VARCHAR(20) DEFAULT 'excel' COMMENT '报表格式：excel/pdf/csv',
+  `status` VARCHAR(20) DEFAULT 'generating' COMMENT '状态：generating-生成中，completed-已完成，failed-失败，deleted-已删除',
+  `size` BIGINT DEFAULT 0 COMMENT '文件大小（字节）',
+  `content` LONGTEXT COMMENT '报表内容（JSON格式）',
+  `created_by` VARCHAR(50) NOT NULL COMMENT '创建人ID',
+  `created_by_name` VARCHAR(100) COMMENT '创建人姓名',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `completed_at` DATETIME COMMENT '完成时间',
+  `deleted_at` DATETIME COMMENT '删除时间',
+  `error` TEXT COMMENT '错误信息',
+  PRIMARY KEY (`id`),
+  KEY `idx_category` (`category`),
+  KEY `idx_status` (`status`),
+  KEY `idx_created_by` (`created_by`),
+  KEY `idx_created_at` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='报表表';
