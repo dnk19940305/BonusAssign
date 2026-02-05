@@ -181,14 +181,20 @@ class ProjectBonusService {
       let totalWeight = 0
       const validMembers = [] // 用于存储有效的成员和其权重
 
+      // 首先计算总权重并收集有效成员
       console.log(`📋 开始计算成员权重...`)
+      
+      // ✅ 问题3修复: 记录计算失败的成员
+      const calculationErrors = []
 
       // 首先计算总权重并收集有效成员
       for (const member of approvedMembers) {
         try {
           const employee = await databaseService.getEmployeeById(member.employeeId)
           if (!employee) {
-            console.warn(`未找到员工信息: ${member.employeeId}`)
+            const errorMsg = `未找到员工信息: ${member.employeeId}`
+            console.warn(errorMsg)
+            calculationErrors.push({ employeeId: member.employeeId, error: errorMsg })
             continue
           }
 
@@ -230,10 +236,16 @@ class ProjectBonusService {
           if (Object.prototype.hasOwnProperty.call(roleWeights, roleId)) {
             const w = typeof roleWeights[roleId] === 'number' ? roleWeights[roleId] : parseFloat(roleWeights[roleId])
             roleWeight = !isNaN(w) ? w : 0
-          } else if (Object.prototype.hasOwnProperty.call(roleWeights, 'developer')) {
-            const w = typeof roleWeights['developer'] === 'number' ? roleWeights['developer'] : parseFloat(roleWeights['developer'])
+          } else if (Object.prototype.hasOwnProperty.call(roleWeights, 'DEVELOPER')) {
+            // 兼容fallback: 使用 DEVELOPER 的权重
+            const w = typeof roleWeights['DEVELOPER'] === 'number' ? roleWeights['DEVELOPER'] : parseFloat(roleWeights['DEVELOPER'])
+            roleWeight = !isNaN(w) ? w : 1.0
+          } else if (Object.prototype.hasOwnProperty.call(roleWeights, 'default')) {
+            // 最后兼容: 使用 default 权重
+            const w = typeof roleWeights['default'] === 'number' ? roleWeights['default'] : parseFloat(roleWeights['default'])
             roleWeight = !isNaN(w) ? w : 1.0
           } else {
+            // 最终兼容: 硬编码 1.0
             roleWeight = 1.0
           }
           
@@ -270,10 +282,23 @@ class ProjectBonusService {
             
             console.log(`成员 ${employee.name} (角色: ${roleId})：权重 = ${roleWeight} × ${contributionWeight}% × ${estimatedWorkload}% × ${participationRatio}% × ${performanceCoeff} = ${memberWeight.toFixed(4)}`)
           } else {
-            console.warn(`成员 ${employee.name} 的权重为0，将被跳过`)
+            const warnMsg = `成员 ${employee.name} 的权重为0，将被跳过`
+            console.warn(warnMsg)
+            calculationErrors.push({ employeeId: member.employeeId, employeeName: employee.name, error: warnMsg })
           }
         } catch (error) {
-          console.error(`处理成员 ${member.employeeId} 时出错:`, error.message)
+          const errorMsg = `处理成员 ${member.employeeId} 时出错: ${error.message}`
+          console.error(errorMsg)
+          calculationErrors.push({ employeeId: member.employeeId, error: errorMsg })
+        }
+      }
+      
+      // ✅ 问题3修复: 检查是否有关键成员计算失败
+      if (calculationErrors.length > 0) {
+        console.warn(`⚠️  有 ${calculationErrors.length} 个成员计算失败:`, calculationErrors)
+        // 如果失败数超过30%，阻断流程
+        if (calculationErrors.length / approvedMembers.length > 0.3) {
+          throw new Error(`计算失败成员比例过高 (${calculationErrors.length}/${approvedMembers.length})，阻断奖金计算`)
         }
       }
 
@@ -286,14 +311,26 @@ class ProjectBonusService {
       // 然后计算每个成员的实际奖金
       console.log(`💰 开始奖金分配计算...`)
       
-      for (const memberData of validMembers) {
+      // ✅ 问题2修复: 使用整数计算避免浮点误差（单位:分）
+      const poolAmountCents = Math.round(pool.totalAmount * 100) // 转为分
+      let allocatedCents = 0 // 已分配金额（分）
+      
+      for (let i = 0; i < validMembers.length; i++) {
+        const memberData = validMembers[i]
         const { member, employee, roleId, roleWeight, participationRatio, performanceCoeff, memberWeight } = memberData
         
-        // 计算奖金金额
-        const bonusAmount = (pool.totalAmount * memberWeight / totalWeight)
+        // ✅ 问题2修复: 整数计算金额（分）
+        let bonusAmountCents
+        if (i === validMembers.length - 1) {
+          // 最后一个成员，使用剩余金额避免误差累积
+          bonusAmountCents = poolAmountCents - allocatedCents
+        } else {
+          bonusAmountCents = Math.round(poolAmountCents * memberWeight / totalWeight)
+        }
         
-        // 防止金额为负数或无效值
-        const finalBonusAmount = Math.max(0, Math.round(bonusAmount * 100) / 100)
+        // 转回元（保疙2位小数）
+        const finalBonusAmount = Math.max(0, bonusAmountCents / 100)
+        allocatedCents += bonusAmountCents
 
         const allocation = {
           poolId: pool._id,
@@ -313,13 +350,18 @@ class ProjectBonusService {
         console.log(`✅ ${employee.name}: ${finalBonusAmount} 元 (权重比例: ${(memberWeight/totalWeight*100).toFixed(2)}%)`)
       }
 
-      // 验证分配结果
-      const totalAllocated = allocations.reduce((sum, allocation) => sum + allocation.bonusAmount, 0)
-      const allocationDifference = Math.abs(totalAllocated - pool.totalAmount)
+      // ✅ 问题2修复: 使用整数验证分配结果
+      const totalAllocatedCents = allocations.reduce((sum, allocation) => sum + Math.round(allocation.bonusAmount * 100), 0)
+      const allocationDifferenceCents = Math.abs(totalAllocatedCents - poolAmountCents)
       
-      if (allocationDifference > 1) { // 允许小于1元的误差
-        console.warn(`奖金分配总额与奖金池总额不一致: 分配${totalAllocated}, 池${pool.totalAmount}, 差异${allocationDifference}`)
+      // ✅ 问题3修复: 严格验证分配结果
+      if (allocationDifferenceCents > 1) { // 允许1分的误差
+        const errorMsg = `奖金分配总额与奖金池总额不一致: 分配${(totalAllocatedCents/100).toFixed(2)}元, 池${pool.totalAmount}元, 差异${(allocationDifferenceCents/100).toFixed(2)}元`
+        console.error(`❌ ${errorMsg}`)
+        throw new Error(errorMsg) // ✅ 问题3修复: 严格阻断而不是仅警告
       }
+      
+      console.log(`✅ 奖金分配验证通过: 总额${(totalAllocatedCents/100).toFixed(2)}元, 误差${(allocationDifferenceCents/100).toFixed(2)}元`)
 
       // 先删除该奖金池的所有旧分配记录，防止重复
       console.log(`🧹 清理该奖金池的旧分配记录...`)
@@ -531,6 +573,7 @@ class ProjectBonusService {
 
   /**
    * 获取项目角色权重配置
+   * ✅ 使用 project_role_weights、project_role_weight_templates 和 project_roles 表
    */
   async getProjectRoleWeights(projectId) {
     try {
@@ -539,47 +582,68 @@ class ProjectBonusService {
         return await this.getDefaultRoleWeights()
       }
 
-      // 尝试获取项目特定的角色权重配置
-      const projectWeights = await databaseService.findOne('projectRoleWeights', {
-        projectId: projectId.toString()
-      })
-
-      if (projectWeights && projectWeights.weights) {
-        let rawWeights = projectWeights.weights
-        // 兼容历史数据：如果是字符串尝试解析为JSON
-        if (typeof rawWeights === 'string') {
+      // 步骤1: 查找项目专属权重配置
+      const projectWeights = await databaseManager.query(`
+        SELECT weights 
+        FROM project_role_weights 
+        WHERE project_id = ? 
+        LIMIT 1
+      `, [projectId])
+      
+      if (projectWeights && projectWeights.length > 0 && projectWeights[0].weights) {
+        let weights = projectWeights[0].weights
+        
+        // 处理JSON字符串
+        if (typeof weights === 'string') {
           try {
-            rawWeights = JSON.parse(rawWeights)
+            weights = JSON.parse(weights)
           } catch (e) {
-            console.warn('项目角色权重字段为不可解析的字符串，忽略该配置')
-            rawWeights = null
+            console.warn('项目角色权重JSON解析失败，尝试使用模板')
+            weights = null
           }
         }
-
-        if (rawWeights && typeof rawWeights === 'object') {
-        // 验证权重数据的有效性
-        const validWeights = {}
-        for (const [role, weight] of Object.entries(rawWeights)) {
-          const numWeight = typeof weight === 'number' ? weight : parseFloat(weight)
-          // 接受0以支持禁用某角色；仅过滤掉NaN和负数
-          if (!isNaN(numWeight) && numWeight >= 0) {
-            validWeights[role] = numWeight
-          }
-        }
-
-        if (Object.keys(validWeights).length > 0) {
-          console.log(`使用项目 ${projectId} 的专属角色权重:`, validWeights)
-          return { ...(await this.getDefaultRoleWeights()), ...validWeights }
-        }
+        
+        if (weights && typeof weights === 'object' && Object.keys(weights).length > 0) {
+          console.log(`✅ 项目 ${projectId} 使用专属角色权重`)
+          return weights
         }
       }
-
-      // 如果没有项目特定配置，使用默认权重
-      console.log(`项目 ${projectId} 没有专属角色权重，使用默认配置`)
+      
+      console.log(`项目 ${projectId} 没有专属角色权重，尝试使用模板`)
+      
+      // 步骤2: 使用模板 tpl_standard_tech
+      const templateWeights = await databaseManager.query(`
+        SELECT weights 
+        FROM project_role_weight_templates 
+        WHERE id = 'tpl_standard_tech' AND is_active = 1
+        LIMIT 1
+      `)
+      
+      if (templateWeights && templateWeights.length > 0 && templateWeights[0].weights) {
+        let weights = templateWeights[0].weights
+        
+        if (typeof weights === 'string') {
+          try {
+            weights = JSON.parse(weights)
+          } catch (e) {
+            console.warn('模板JSON解析失败，尝试使用 project_roles')
+            weights = null
+          }
+        }
+        
+        if (weights && typeof weights === 'object' && Object.keys(weights).length > 0) {
+          console.log(`✅ 使用模板 tpl_standard_tech 的权重配置`)
+          return weights
+        }
+      }
+      
+      console.log(`未找到模板 tpl_standard_tech，使用 project_roles 表`)
+      
+      // 步骤3: 从 project_roles 表获取默认权重
       return await this.getDefaultRoleWeights()
 
     } catch (error) {
-      console.error(`获取项目 ${projectId} 角色权重失败:`, error.message)
+      console.error(`❌ 获取项目 ${projectId} 角色权重失败:`, error.message)
       return await this.getDefaultRoleWeights()
     }
   }
@@ -602,59 +666,67 @@ class ProjectBonusService {
    * 获取默认角色权重
    * 注意：这里的 key 应该使用 project_roles 表中的 code 字段
    */
+  /**
+   * 获取默认角色权重（从 project_roles 表读取）
+   * ✅ 由于 default_weight 字段为 int 且大多为 NULL，使用硬编码映射
+   */
   async getDefaultRoleWeights() {
     try {
-      // 尝试从 project_roles 表获取默认角色权重
-      const allRoles = await databaseService.findAll('projectRoles')
-      const roles = allRoles.rows || allRoles || []
+      // 从 project_roles 表读取角色列表
+      const roles = await databaseManager.query(`
+        SELECT code, default_weight, name
+        FROM project_roles 
+        WHERE status = 1
+      `)
       
-      const defaultWeights = {}
-      
-      // 使用数据库中配置的角色作为默认权重
-      roles.forEach(role => {
-        if (role && role.code && role.weight !== undefined && role.weight !== null) {
-          // 使用数据库中的权重配置
-          defaultWeights[role.code] = parseFloat(role.weight) || 1.0
+      if (roles && roles.length > 0) {
+        // 硬编码的角色权重映射（因为 default_weight 字段为 NULL）
+        const weightMapping = {
+          'PM': 2.0,           // 项目经理
+          'TECH_LEAD': 1.8,    // 技术负责人
+          'SENIOR_DEV': 1.5,   // 高级开发工程师
+          'DEVELOPER': 1.0,    // 开发工程师
+          'TESTER': 1.0,       // 测试工程师
+          'PRODUCT_MANAGE': 1.0 // 产品经理
         }
-      })
+        
+        const defaultWeights = {}
+        
+        roles.forEach(role => {
+          if (role.code) {
+            // 使用硬编码映射，忽略 default_weight 字段（因为都是 NULL）
+            defaultWeights[role.code] = weightMapping[role.code] || 1.0
+          }
+        })
+        
+        if (Object.keys(defaultWeights).length > 0) {
+          console.log(`✅ 从 project_roles 表加载默认权重: ${Object.keys(defaultWeights).length} 个角色`)
+          return defaultWeights
+        }
+      }
       
-      // 确保有一些基本的默认权重以防数据库中没有配置
-      const fallbackWeights = {
-        // 项目角色 (project_roles 表中的 code)
-        'PM': 2.0,            // 项目经理
-        'TECH_LEAD': 1.8,     // 技术负责人
-        'SENIOR_DEV': 1.5,    // 高级开发工程师
-        'DEVELOPER': 1.0,     // 开发工程师
-        'TESTER': 1.0,        // 测试工程师
-
-        // 通用角色 (兼容旧数据)
-        'project_manager': 2.0,
-        'tech_lead': 1.8,
-        'senior_dev': 1.5,
-        'developer': 1.0,
-        'tester': 1.0,
+      // 最后兼容: project_roles 表为空时使用完整硬编码
+      console.warn('⚠️  project_roles 表为空，使用完整硬编码配置')
+      return {
+        'PM': 2.0,
+        'TECH_LEAD': 1.8,
+        'SENIOR_DEV': 1.5,
+        'DEVELOPER': 1.0,
+        'TESTER': 1.0,
+        'PRODUCT_MANAGE': 1.0,
         'default': 1.0
       }
       
-      // 合并数据库配置和硬编码默认值
-      return { ...fallbackWeights, ...defaultWeights }
     } catch (error) {
-      console.warn('获取数据库角色权重失败，使用硬编码默认值:', error.message)
-      // 如果数据库查询失败，返回硬编码的默认权重
+      console.error('❌ 获取默认角色权重失败:', error.message)
+      // 异常兼容: 返回硬编码配置
       return {
-        // 项目角色 (project_roles 表中的 code)
-        'PM': 2.0,            // 项目经理
-        'TECH_LEAD': 1.8,     // 技术负责人
-        'SENIOR_DEV': 1.5,    // 高级开发工程师
-        'DEVELOPER': 1.0,     // 开发工程师
-        'TESTER': 1.0,        // 测试工程师
-
-        // 通用角色 (兼容旧数据)
-        'project_manager': 2.0,
-        'tech_lead': 1.8,
-        'senior_dev': 1.5,
-        'developer': 1.0,
-        'tester': 1.0,
+        'PM': 2.0,
+        'TECH_LEAD': 1.8,
+        'SENIOR_DEV': 1.5,
+        'DEVELOPER': 1.0,
+        'TESTER': 1.0,
+        'PRODUCT_MANAGE': 1.0,
         'default': 1.0
       }
     }
